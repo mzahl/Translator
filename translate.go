@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"flag"
 	"fmt"
 	"log"
 	"os"
@@ -14,6 +15,25 @@ import (
 	"golang.org/x/text/language"
 	"google.golang.org/api/option"
 )
+
+var (
+	// commandline parameters
+	secret   string
+	addOpts  bool = false
+	override bool = false
+	fromLang string
+)
+
+type arrayFlags []string
+
+func (i *arrayFlags) String() string {
+	return "my string representation"
+}
+
+func (i *arrayFlags) Set(value string) error {
+	*i = append(*i, value)
+	return nil
+}
 
 func AuthTranslate(jsonPath, projectID string) (*translate.Client, context.Context, error) {
 	ctx := context.Background()
@@ -27,19 +47,22 @@ func AuthTranslate(jsonPath, projectID string) (*translate.Client, context.Conte
 }
 
 // this is directly copy/pasted from Google example
-func translateTextWithModel(targetLanguage, text, model string) (string, error) {
+func translateTextWithModel(sourceLanguage, targetLanguage, text, model string) (string, error) {
 
 	lang, err := language.Parse(targetLanguage)
 	if err != nil {
 		return "", fmt.Errorf("language.Parse: %v", err)
 	}
-	client, ctx, err := AuthTranslate("google-secret.json", "103373479946395174633")
+	srclang, err := language.Parse(sourceLanguage)
+
+	client, ctx, err := AuthTranslate(secret, "191698508205") // 103373479946395174633
 	if err != nil {
 		return "", fmt.Errorf("translate.NewClient: %v", err)
 	}
 	defer client.Close()
 	resp, err := client.Translate(ctx, []string{text}, lang, &translate.Options{
-		Model: model, // Either "nmt" or "base".
+		Model:  model, // Either "nmt" or "base".
+		Source: srclang,
 	})
 	if err != nil {
 		return "", fmt.Errorf("Translate: %v", err)
@@ -61,10 +84,10 @@ func xl(fromLang string, toLang string, xlate string) string {
 	// fix URLs because google translate changes [link](http://you.link) to
 	// [link] (http://your.link) and it *also* will translate any path
 	// components, thus breaking your URLs.
-	reg := regexp.MustCompile(`]\([-a-zA-Z0-9@:%._\+~#=\/]{1,256}\)`)
+	reg := regexp.MustCompile(`]\([-a-zA-Z0-9@:%._+~#=/]{1,256}\)`)
 	// get all the URLs with a single RegEx, keep them for later.
 	var foundUrls [][]byte = reg.FindAll([]byte(xlate), -1)
-	translated, err := translateTextWithModel(toLang, xlate, "nmt")
+	translated, err := translateTextWithModel(fromLang, toLang, xlate, "nmt")
 	checkError(err)
 	// a bunch of regexs to fix other broken stuff
 	reg = regexp.MustCompile(` (\*\*) ([A-za-z0-9]+) (\*\*)`) // fix bolds (**foo**)
@@ -84,7 +107,7 @@ func xl(fromLang string, toLang string, xlate string) string {
 	reg = regexp.MustCompile(`({{)(<)[ ]{1,3}([yY]outube)`) // fix youtube shortcodes
 	translated = string(reg.ReplaceAll([]byte(translated), []byte("$1$2 youtube")))
 	// Now it's time to go back and replace all the fucked up urls ...
-	reg = regexp.MustCompile(`] \([-a-zA-Z0-9@:%._\+~#=\/ ]{1,256}\)`)
+	reg = regexp.MustCompile(`] \([-a-zA-Z0-9@:%._+~#=/ ]{1,256}\)`)
 	for x := 0; x < len(foundUrls); x++ {
 		// fmt.Println("FoundURL: ", string(foundUrls[x]))
 		tmp := reg.FindIndex([]byte(translated))
@@ -111,6 +134,14 @@ func doXlate(from string, lang string, readFile string, writeFile string) {
 	for scanner.Scan() {
 		ln := scanner.Text()
 		if strings.HasPrefix(ln, "{{") {
+			reg := regexp.MustCompile(`\stitle="(.*)?"\s*`) // Example: {{< hint type=important title="Hinweis 2" >}}
+			match := reg.FindStringSubmatch(ln)
+			for i := range match {
+				// fmt.Println("Title :", match[i])
+				trans := " " + xl(from, lang, match[i]) + " "
+				ln = strings.ReplaceAll(ln, match[i], trans)
+			}
+
 			xfile.WriteString(ln + "\n")
 			continue
 		}
@@ -120,6 +151,14 @@ func doXlate(from string, lang string, readFile string, writeFile string) {
 			continue
 		}
 		if code { // I don't translate code!
+			xfile.WriteString(ln + "\n")
+			continue
+		}
+		if strings.HasPrefix(ln, "	") { // deal with in-line code
+			xfile.WriteString(ln + "\n")
+			continue
+		}
+		if string(ln) == "<--->" { // ignore columns
 			xfile.WriteString(ln + "\n")
 			continue
 		}
@@ -170,7 +209,7 @@ func isValueInList(value string, list []string) bool { // Test Written
 	return false
 }
 
-// future work for automagically translating all files.
+// future work for automatically translating all files.
 func getFile(from string, path string, lang string) {
 	thisDir, err := os.ReadDir(path)
 	checkError(err)
@@ -179,26 +218,30 @@ func getFile(from string, path string, lang string) {
 			if f.Name() == "images" {
 				continue
 			}
-			//fmt.Println("going into ", path + "/" + f.Name())
+			// fmt.Println("going into ", path + "/" + f.Name())
 			getFile(from, path+"/"+f.Name(), lang) // fucking hell, recursion!
 		} else {
-			if strings.Split(f.Name(), ".")[0] == "_index" || strings.Split(f.Name(), ".")[0] == "index" {
+			if strings.HasSuffix(f.Name(), fmt.Sprintf(".%s.md", fromLang)) && (strings.Split(f.Name(), ".")[0] == "_index" || strings.Split(f.Name(), ".")[0] == "index") {
 				fromFile := fmt.Sprintf("%s/%s.%s.md", path, strings.Split(f.Name(), ".")[0], from)
 				toFile := fmt.Sprintf("%s/%s.%s.md", path, strings.Split(f.Name(), ".")[0], lang)
 				// fmt.Println("From: ", fromFile)
 				// fmt.Println(toFile)
 				_, err := os.Stat(toFile)
 				if !os.IsNotExist(err) {
-					if !(strings.Split(f.Name(), ".")[0] == "_index") {
+					if addOpts && !(strings.Split(f.Name(), ".")[0] == "_index") {
 						addReadingTime(fromFile)
 						addReadingTime(toFile)
 					}
 					// fmt.Printf("Already translated:\t %s/index.%s.md\n", path, lang)
-					continue
+					if !override {
+						continue
+					}
 				}
-				addReadingTime(fromFile) // get the reading time first.
+				if addOpts {
+					addReadingTime(fromFile) // get the reading time first.
+				}
 				// fmt.Printf("Found a file to translate:\t %s/%s\n", path, f.Name())
-				fmt.Printf("Translating:\t %s\nto: \t\t%s\n", fromFile, toFile)
+				fmt.Printf("Translating:\t%s\nto: \t\t%s\n", fromFile, toFile)
 				doXlate(from, lang, fromFile, toFile)
 				// }
 				continue
@@ -207,15 +250,22 @@ func getFile(from string, path string, lang string) {
 	}
 }
 
+// adds the reading time for the page
 func addReadingTime(file string) {
+
 	// fmt.Println("Reading: ", file)
 	f, err := os.ReadFile(file)
 	if strings.Index(string(f), "reading_time:") > 0 {
 		return
 	}
 	checkError(err)
+	m := regexp.MustCompile("\n---\n")
+
 	estimation := readingtime.Estimate(string(f))
-	fm := strings.LastIndex(string(f), "---")
+	r := m.FindStringIndex(string(f))
+	fm := r[0]
+	// fmt.Printf("Found: %s with index value: %d (Pos 2: %d)", "---", r, fm)
+
 	newArt := f[:fm]
 	fw, err := os.Create(file)
 	checkError(err)
@@ -224,9 +274,9 @@ func addReadingTime(file string) {
 	mins := int(estimation.Duration.Minutes())
 	dur := ""
 	if mins > 1 {
-	dur = fmt.Sprintf("reading_time: %d minutes\n", mins)
+		dur = fmt.Sprintf("\nreading_time: %d minutes", mins)
 	} else if mins == 1 {
-	dur = fmt.Sprintf("reading_time: %d minute\n", mins)
+		dur = fmt.Sprintf("\nreading_time: %d minute", mins)
 	} else {
 	}
 	fw.WriteString(dur)
@@ -235,12 +285,34 @@ func addReadingTime(file string) {
 }
 
 func main() {
-	fromLang := "en"
-	langs := [4]string{"nl", "fr", "de", "es"} // only doing these four languages right now
-	dir := os.Args[1]                          // only doing a directory passed in
+	var dir string
+	var langs arrayFlags
+
+	// command line parameters
+	flag.StringVar(&secret, "secret", "google-secret.json", "Google-Secret JSON-File")
+	flag.StringVar(&fromLang, "fromLang", "de", "Source language")
+	flag.StringVar(&dir, "dir", ".", "Search directory")
+	flag.BoolVar(&addOpts, "add", false, "Add informations")
+	flag.BoolVar(&override, "override", false, "Override existing files")
+	flag.Var(&langs, "lang", "Destination language")
+	flag.Parse()
+
+	fmt.Println("----------------------------------")
+	fmt.Println("Parameters:")
+	fmt.Println("- secret-file:      ", secret)
+	fmt.Println("- directory:        ", dir)
+	fmt.Println("- add informations: ", addOpts)
+	fmt.Println("- override files:   ", override)
+	fmt.Println("- source language:  ", fromLang)
+	fmt.Println("- dest languages:   ", langs)
+	fmt.Println("----------------------------------")
+
+	// langs := [1]string{"en"} // only doing these four languages right now
+	//	langs := [4]string{"tr", "fr", "en", "es"} // only doing these four languages right now
+	//	dir := os.Args[1]                          // only doing a directory passed in
 	for x := 0; x < len(langs); x++ {
 		lang := langs[x]
-		// fmt.Print("Translating: \n" + dir + "\nTo: ")
+		fmt.Print("Translating: " + fromLang + " -> " + lang + "\n")
 		// switch lang {
 		// case "es":
 		// 	fmt.Println("Spanish")

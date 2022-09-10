@@ -18,7 +18,15 @@ Once you have google translate set up and working, using this program consists o
 % ./translate <full path to the file to be translated.md>
 ```
 
-Right now, it is hard-coded to translate whatever file you tell it to French, German and Spanish. I am working on making this more robust so you can list languages, list files, or just give it a directory to scan and find all the underlying `index.en.md` files in it.
+Start parameter:
+```
+--secret=<file>             Path to the google-secret.json
+--fromLang=<langguage code> Source language (default: de)
+--lang=<langguage code>     Parameter for the destination language. Can put several times. Example: --lang=en --lang=fr
+--dir=<content path>        Path of the md files to translate recursiv 
+--override                  Override existing files?
+--add                       Add additional informations (e.g. reading time)?
+```
 
 **Note:** You should have all of your blog posts in `index.en.md` files, not just `index.md` files or this program won't find them.
 
